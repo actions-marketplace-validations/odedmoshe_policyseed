@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
  * policyseed — free, offline SOC 2 policy generator.
- * Deterministic Markdown from a YAML intake file and the bundled templates. No network calls,
- * no LLM, no signup. See ../README.md for full docs.
+ * Deterministic Markdown from a YAML intake file and the bundled templates. No LLM, no signup.
+ * init, build, check, list and mcp make no network calls. `evidence` makes none of its own: it
+ * runs the aws, gcloud and gh CLIs the user already has, with read-only commands, and only when
+ * asked. See ../README.md for full docs.
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +16,9 @@ import {
   CADENCE_DAYS, evaluateReviews, readPolicyFiles,
 } from "../lib/policies.js";
 import { startMcpServer } from "../lib/mcp.js";
+import {
+  PROVIDERS, COLLECTORS, DEFAULT_MAX_BUCKETS, selectCollectors, planCommands, collectEvidence,
+} from "../lib/evidence.js";
 
 class CliError extends Error {}
 
@@ -177,6 +182,91 @@ function cmdCheck(args) {
 }
 
 /* ---------------------------------------------------------------------------------------------
+ * evidence
+ * ------------------------------------------------------------------------------------------- */
+
+const EVIDENCE_VALUE_FLAGS = ["--providers", "--out", "--repo", "--org", "--project", "--max-buckets"];
+const EVIDENCE_BOOLEAN_FLAGS = ["--dry-run", "--list", "--redact-account-ids"];
+
+function parseEvidenceArgs(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (EVIDENCE_VALUE_FLAGS.includes(a)) i++;
+    else if (!EVIDENCE_BOOLEAN_FLAGS.includes(a)) fail(`evidence: unknown argument "${a}". See policyseed --help.`);
+  }
+
+  const providers = flagValue(args, "--providers", PROVIDERS.join(","))
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const unknown = providers.filter((p) => !PROVIDERS.includes(p));
+  if (unknown.length || providers.length === 0) {
+    fail(`--providers must be a comma-separated list of: ${PROVIDERS.join(", ")} (got "${unknown.join(",") || ""}")`);
+  }
+
+  // repo and org become GitHub API paths, so they must look like GitHub names and nothing else.
+  const repo = flagValue(args, "--repo", undefined);
+  if (repo !== undefined && !/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo)) fail(`--repo must look like owner/name (got "${repo}")`);
+  const org = flagValue(args, "--org", undefined);
+  if (org !== undefined && !/^[A-Za-z0-9-]+$/.test(org)) fail(`--org must be a GitHub organization login (got "${org}")`);
+  // The project is passed to gcloud as its own argv element; refuse anything gcloud would read as a flag.
+  const project = flagValue(args, "--project", undefined);
+  if (project !== undefined && (project === "" || project.startsWith("-"))) fail(`--project must be a project ID (got "${project}")`);
+
+  const maxBucketsRaw = flagValue(args, "--max-buckets", String(DEFAULT_MAX_BUCKETS));
+  const maxBuckets = Number(maxBucketsRaw);
+  if (!Number.isInteger(maxBuckets) || maxBuckets < 0) fail(`--max-buckets must be a whole number (got "${maxBucketsRaw}")`);
+
+  return {
+    providers: PROVIDERS.filter((p) => providers.includes(p)),
+    outDir: flagValue(args, "--out", "evidence"),
+    repo,
+    org,
+    project,
+    maxBuckets,
+    redactAccountIds: args.includes("--redact-account-ids"),
+    dryRun: args.includes("--dry-run"),
+    list: args.includes("--list"),
+  };
+}
+
+async function cmdEvidence(args) {
+  const opts = parseEvidenceArgs(args);
+
+  if (opts.list) {
+    console.log(`${COLLECTORS.length} evidence collectors (all read-only):\n`);
+    printTable(
+      COLLECTORS.map((c) => ({ id: c.id, provider: c.provider, criteria: c.criteria.join(", "), description: c.description })),
+      [
+        { key: "id", label: "ID" },
+        { key: "provider", label: "Provider" },
+        { key: "criteria", label: "Criteria" },
+        { key: "description", label: "What it shows" },
+      ]
+    );
+    return;
+  }
+
+  const collectors = selectCollectors(opts.providers);
+  if (opts.dryRun) {
+    console.log("Dry run: these read-only commands would run. Nothing is executed and nothing is written.\n");
+    for (const line of planCommands(collectors, opts, { maxBuckets: opts.maxBuckets })) console.log(line);
+    return;
+  }
+
+  console.log(`Collecting SOC 2 evidence (read-only) for: ${opts.providers.join(", ")}\n`);
+  const { dayDir, results, collected } = await collectEvidence(opts, {
+    log: (line) => console.log(line),
+    toolVersion: readVersion(),
+  });
+  console.log(`\nCollected ${collected} of ${results.length}. Index: ${join(dayDir, "INDEX.md")}`);
+  if (collected === 0) {
+    console.error("policyseed: nothing was collected. INDEX.md lists the reason for each item.");
+    process.exitCode = 1;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
  * list / help / version
  * ------------------------------------------------------------------------------------------- */
 
@@ -223,6 +313,16 @@ Usage:
       Claude Code, Cursor, ...) can list, interview for and render the policies.
       See docs/mcp.md for client setup.
 
+  policyseed evidence [--providers aws,gcp,github] [--out <dir>] [--repo owner/name]
+                     [--org <name>] [--project <gcp-project>] [--max-buckets <n>]
+                     [--redact-account-ids] [--dry-run] [--list]
+      Collect SOC 2 evidence with the aws, gcloud and gh CLIs you already have installed and
+      signed in, using read-only commands only. Writes <dir>/<YYYY-MM-DD>/ (default dir:
+      ./evidence) with one JSON file per item and an INDEX.md mapping each file to a SOC 2
+      criterion. A missing CLI or permission is recorded in INDEX.md and the run continues;
+      the exit code is 1 only if nothing was collected. --dry-run prints the exact commands,
+      --list prints the collectors. --max-buckets caps per-bucket S3 checks (default 50).
+
   policyseed --help
   policyseed --version
 
@@ -255,18 +355,20 @@ function main() {
       return cmdList();
     case "mcp":
       return cmdMcp();
+    case "evidence":
+      return cmdEvidence(rest);
     default:
       fail(`Unknown command: ${command}\n\n${HELP}`);
   }
 }
 
-try {
-  main();
-} catch (err) {
-  if (err instanceof CliError) {
-    console.error(`policyseed: ${err.message}`);
+Promise.resolve()
+  .then(main)
+  .catch((err) => {
+    if (err instanceof CliError) {
+      console.error(`policyseed: ${err.message}`);
+      process.exit(1);
+    }
+    console.error(`policyseed: unexpected error: ${err.message}`);
     process.exit(1);
-  }
-  console.error(`policyseed: unexpected error: ${err.message}`);
-  process.exit(1);
-}
+  });

@@ -6,7 +6,10 @@ from a single YAML intake file, using a small template engine and zero runtime d
 - **Free and Apache-2.0.** Use it, fork it, modify it, ship it internally or to customers.
 - **Deterministic.** The same `intake.yaml` always produces the same Markdown. No randomness.
 - **No LLM.** Templates are plain Markdown with a Mustache-style tag syntax, not model output.
-- **No signup, no network calls.** Runs entirely on your machine or CI runner.
+- **No signup. No network calls unless you collect evidence.** `build`, `check`, `init`, `list`
+  and `mcp` make no network calls and run entirely on your machine or CI runner. `evidence` calls
+  only the cloud CLIs you already use (`aws`, `gcloud`, `gh`), with read-only commands, and only
+  when you run it.
 
 It will not, by itself, make you SOC 2 compliant. See [What this is not](#what-this-is-not).
 
@@ -30,6 +33,8 @@ npx github:odedmoshe/policyseed check
   reviewed date is older than its `review_cadence` allows. This is what the bundled GitHub
   Action runs on a schedule so an overdue policy shows up as a failing check.
 - `list` prints the 22 bundled templates.
+- `evidence` collects read-only SOC 2 evidence from AWS, Google Cloud and GitHub with the CLIs
+  you already have signed in. See [Collecting audit evidence](#collecting-audit-evidence).
 - `--help` and `--version` do what you'd expect.
 
 If you'd rather install it as a dependency:
@@ -122,6 +127,138 @@ claude mcp add policyseed -- npx -y github:odedmoshe/policyseed mcp
 
 Claude Desktop and Cursor configuration, the tool list and an example conversation are in
 [docs/mcp.md](./docs/mcp.md).
+
+## Collecting audit evidence
+
+Auditors ask for proof that controls are configured: branch protection, MFA, encryption at rest,
+logging, who has admin access. `policyseed evidence` gathers that with the `aws`, `gcloud` and `gh`
+CLIs you already have installed and signed in, and saves it as dated JSON files plus an index:
+
+```sh
+npx github:odedmoshe/policyseed evidence --providers aws,gcp,github \
+  --repo acme/app --org acme --project acme-prod
+```
+
+```text
+evidence/2026-10-23/
+  INDEX.md                                 criterion -> file -> what it shows -> auditor question
+  CC6.1-aws-iam-account-summary.json
+  CC6.1-aws-iam-credential-report.json
+  CC8.1-github-branch-protection.json
+  ...
+```
+
+How it behaves:
+
+- **Read-only.** Every command is a Describe, Get or List call (`gh api` GET requests, no request
+  fields). The one exception in name only is `aws iam generate-credential-report`, which asks IAM
+  to build the credential report; IAM classifies it as a Read action and it changes no settings.
+  `--dry-run` prints the exact commands without running anything; `--list` prints the collectors.
+- **No shell.** Each command runs with Node's `execFile` and a fixed argument array. `--repo`,
+  `--org`, `--project`, bucket names and trail ARNs are passed as separate arguments, never
+  interpolated into a shell string. Pagers and interactive prompts are turned off.
+- **Each file** wraps the CLI's JSON output with the command that produced it, the time, the CLI
+  version and the exit code. Files are named `<criterion>-<collector-id>.json` after the
+  collector's first SOC 2 criterion; INDEX.md lists every criterion a file supports.
+- **Redaction.** Before anything is written or printed, values under secret-looking keys
+  (`SessionToken`, `SecretAccessKey`, `password`, `token`, ...) are replaced, and so are strings
+  that look like credentials: GitHub tokens, AWS access key IDs and session tokens, Google API keys
+  and OAuth tokens, JWTs, PEM private keys and `key=value` secrets. Secrets are never requested in
+  the first place. Account IDs are kept, because auditors usually need them; pass
+  `--redact-account-ids` to truncate 12-digit IDs to their last four digits.
+- **Failures don't stop the run.** A missing CLI, missing credentials or a permission error is
+  written to INDEX.md as `not collected: <reason>` and the run moves on. The exit code is 1 only
+  if nothing at all was collected.
+- **Re-runs.** A run replaces the files its providers wrote earlier the same day and rewrites
+  INDEX.md. Other days' folders, other providers' files and any files you add yourself (such as
+  screenshots) are left alone.
+- **Scope.** Regional AWS checks (EBS default encryption, RDS, CloudTrail) use the CLI's
+  configured region (`AWS_REGION` or the profile's region). GitHub checks cover one repository and
+  one organization; Google Cloud checks cover one project (`--project`, or the gcloud default).
+  S3 per-bucket checks stop after `--max-buckets` buckets (default 50). On Windows, `gcloud` is a
+  `.cmd` script that Node can't start without a shell, so the Google Cloud collectors report it as
+  not collected there.
+
+### What it collects
+
+| Collector | Criteria | Command |
+| --- | --- | --- |
+| `github-repo-settings` | CC7.1 | `gh api repos/{repo}`: default branch, secret scanning and push protection |
+| `github-branch-protection` | CC8.1 | `gh api repos/{repo}/branches/{default}/protection` |
+| `github-branch-rules` | CC8.1 | `gh api --paginate repos/{repo}/rules/branches/{default}` (ruleset rules) |
+| `github-dependabot-alerts` | CC7.1 | `gh api repos/{repo}/vulnerability-alerts` |
+| `github-org-2fa` | CC6.1 | `gh api orgs/{org}`: `two_factor_requirement_enabled` |
+| `github-org-admins` | CC6.3 | `gh api --paginate orgs/{org}/members?role=admin` |
+| `aws-iam-account-summary` | CC6.1 | `aws iam get-account-summary`: root MFA, root access keys |
+| `aws-iam-credential-report` | CC6.1, CC6.2 | `aws iam generate-credential-report`, then `get-credential-report`, decoded and reduced to the MFA, password and access-key age columns |
+| `aws-iam-password-policy` | CC6.1 | `aws iam get-account-password-policy` |
+| `aws-cloudtrail` | CC7.2 | `aws cloudtrail describe-trails`, then `get-trail-status` per trail |
+| `aws-ebs-default-encryption` | CC6.1 | `aws ec2 get-ebs-encryption-by-default` |
+| `aws-s3-buckets` | CC6.1, CC6.6 | `aws s3api list-buckets`, then `get-bucket-encryption` and `get-public-access-block` per bucket |
+| `aws-rds-instances` | CC6.1, A1.2 | `aws rds describe-db-instances`: StorageEncrypted, BackupRetentionPeriod and related fields |
+| `gcp-project-iam-policy` | CC6.3 | `gcloud projects get-iam-policy {project}` |
+| `gcp-logging-sinks` | CC7.2 | `gcloud logging sinks list` |
+| `gcp-sql-instances` | A1.2, CC6.1 | `gcloud sql instances list` (backup configuration) |
+| `gcp-compute-disks` | CC6.1 | `gcloud compute disks list` (encryption keys) |
+| `gcp-organizations` | CC6.1 | `gcloud organizations list` |
+
+All `aws` commands add `--output json` and all `gcloud` commands add `--format=json`.
+
+### Permissions it needs
+
+Give the identity you run it with read access only.
+
+**AWS.** This policy covers every AWS collector and nothing else:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PolicyseedEvidenceReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetAccountSummary",
+        "iam:GenerateCredentialReport",
+        "iam:GetCredentialReport",
+        "iam:GetAccountPasswordPolicy",
+        "cloudtrail:DescribeTrails",
+        "cloudtrail:GetTrailStatus",
+        "ec2:GetEbsEncryptionByDefault",
+        "s3:ListAllMyBuckets",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetBucketPublicAccessBlock",
+        "rds:DescribeDBInstances"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+**Google Cloud.** `roles/viewer` on the project covers the project collectors, and
+`roles/resourcemanager.organizationViewer` on the organization covers `organizations list`.
+For narrower access, grant `roles/iam.securityReviewer` (IAM policy), `roles/logging.viewer`
+(sinks), `roles/cloudsql.viewer` (SQL instances) and `roles/compute.viewer` (disks) on the project.
+
+**GitHub.** `gh` uses whatever it is signed in with (`gh auth login`, or `GH_TOKEN`). Repository
+admin read access is needed for classic branch protection, the `security_and_analysis` block and
+the Dependabot alerts setting; the ruleset rules need only read access. For the organization,
+GitHub returns `two_factor_requirement_enabled` only to organization owners, and lists private
+members only to members. A fine-grained token with repository *Administration: read* and
+*Metadata: read* and organization *Members: read* covers the rest. A collector the token can't
+read is recorded as not collected, never as a pass.
+
+To run the GitHub collectors on a schedule and keep the results as a workflow artifact, see
+[docs/evidence.md](./docs/evidence.md).
+
+### What it does not do
+
+It saves configuration as it is on the day you run it. It doesn't judge whether that
+configuration meets your policies, it doesn't cover every control an auditor will test, and it
+doesn't replace the auditor's own testing: they will choose their own samples, may ask you to
+re-run commands while they watch, and will test whether the controls operated over the whole
+audit period.
 
 ## Relationship to the hosted generator and Audit Kit
 
