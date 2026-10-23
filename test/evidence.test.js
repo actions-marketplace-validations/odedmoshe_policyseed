@@ -144,11 +144,11 @@ function withFakes(clis, fn) {
     const logPath = join(root, "argv.log");
     writeFileSync(logPath, "", "utf8");
 
-    const run = (args) => {
+    const run = (args, extraEnv = {}) => {
       const r = spawnSync(process.execPath, [BIN, "evidence", ...args], {
         cwd: work,
         encoding: "utf8",
-        env: { PATH: bin, HOME: root, FAKE_CLI_LOG: logPath, FAKE_CLI_RESPONSES: responses },
+        env: { PATH: bin, HOME: root, FAKE_CLI_LOG: logPath, FAKE_CLI_RESPONSES: responses, ...extraEnv },
       });
       return { status: r.status, stdout: r.stdout, stderr: r.stderr };
     };
@@ -302,9 +302,11 @@ describe("policyseed evidence", { skip }, () => {
 
   test("--redact-account-ids truncates 12-digit account IDs everywhere, including commands and INDEX.md", () => {
     withFakes(["aws"], ({ work, run }) => {
-      const r = run(["--providers", "aws", "--redact-account-ids"]);
+      // The profile name can carry an account ID too; it is written to every AWS file as aws_context.
+      const r = run(["--providers", "aws", "--redact-account-ids"], { AWS_PROFILE: `acct-${ACCOUNT}` });
       assert.equal(r.status, 0, r.stderr);
       const dir = dayDirOf(work);
+      assert.equal(readJson(join(dir, "CC6.1-aws-iam-account-summary.json")).aws_context.profile, "acct-********9012");
       for (const f of readdirSync(dir)) {
         assert.ok(!readFileSync(join(dir, f), "utf8").includes(ACCOUNT), `${f} still contains the account ID`);
       }
