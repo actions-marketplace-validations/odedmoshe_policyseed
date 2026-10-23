@@ -84,6 +84,12 @@ To keep the job going after a failed check and decide what to do yourself, use
         run: echo "Policies are overdue for review (exit ${{ steps.policyseed.outputs.exit-code }})"
 ```
 
+## Collecting evidence on a schedule
+
+The action runs `check` or `build` only. To collect SOC 2 evidence from GitHub on a schedule with
+`policyseed evidence`, run the CLI in a workflow step instead; [docs/evidence.md](./evidence.md)
+has a complete workflow that uploads the results as an artifact.
+
 ## Versioning and pinning
 
 - `@v1` is a moving major-version tag. It gets compatible fixes and never breaking changes.
