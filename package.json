@@ -1,10 +1,11 @@
 {
   "name": "policyseed",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "mcpName": "io.github.odedmoshe/policyseed",
   "description": "Free, offline SOC 2 policy generator. Renders 22 governance policy templates from a YAML intake file. Apache-2.0, no LLM, no signup.",
   "type": "module",
   "bin": {
-    "policyseed": "./bin/policyseed.js"
+    "policyseed": "bin/policyseed.js"
   },
   "files": [
     "bin",
