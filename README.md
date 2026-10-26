@@ -1,7 +1,16 @@
 # policyseed
 
+[![npm](https://img.shields.io/npm/v/policyseed)](https://www.npmjs.com/package/policyseed) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE) [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.odedmoshe%2Fpolicyseed-informational)](https://registry.modelcontextprotocol.io/v0/servers?search=policyseed)
+
 Free, offline SOC 2 policy generator. `policyseed` renders 22 governance policy documents
 from a single YAML intake file, using a small template engine and zero runtime dependencies.
+
+```sh
+npx policyseed init    # writes intake.yaml: company, cloud, identity provider, MFA, team size...
+npx policyseed build   # renders the 22 policies into ./policies/
+```
+
+Prefer a browser? The same templates run at [policyseed.io/generate](https://policyseed.io/generate): 23 questions, no signup, nothing uploaded.
 
 - **Free and Apache-2.0.** Use it, fork it, modify it, ship it internally or to customers.
 - **Deterministic.** The same `intake.yaml` always produces the same Markdown. No randomness.
@@ -11,17 +20,38 @@ from a single YAML intake file, using a small template engine and zero runtime d
   only the cloud CLIs you already use (`aws`, `gcloud`, `gh`), with read-only commands, and only
   when you run it.
 
-It will not, by itself, make you SOC 2 compliant. See [What this is not](#what-this-is-not).
+The policies are a starting point that your company reviews and adopts, not a compliance guarantee. See [What this is not](#what-this-is-not).
+
+## What the output looks like
+
+Every policy names your tools and people from the intake. An excerpt of the Access Control Policy,
+rendered by `npx policyseed build` for an example company (AWS, GitHub, Google Workspace, MFA on,
+11-50 people):
+
+> **4.3** Google Workspace is the single source of workforce identity. Business applications are
+> integrated with it for single sign-on and, where supported, automated provisioning and
+> deprovisioning; applications that cannot federate are recorded in the exception register with a
+> compensating review.
+>
+> **4.8** Access to GitHub is granted through organization membership enforced by single sign-on
+> with Google Workspace, repository permissions are assigned by team, and protected branches
+> require a review from someone other than the author before code is merged and deployed by
+> GitHub Actions. Where headcount makes this impractical, the Security Owner documents the
+> compensating review.
+
+All 22 policies share the same nine sections: purpose, scope, roles and responsibilities, numbered
+policy statements, procedures, exceptions, enforcement, review cadence and revision history. The
+numbered statements make it easy to point an auditor at the exact sentence behind a control.
 
 ## Quick start
 
-Requires Node.js 18 or later. No install step — run it straight from GitHub:
+Requires Node.js 18 or later. No install step — run it with npx:
 
 ```sh
-npx github:odedmoshe/policyseed init
+npx policyseed init
 # edit intake.yaml with your company's details
-npx github:odedmoshe/policyseed build
-npx github:odedmoshe/policyseed check
+npx policyseed build
+npx policyseed check
 ```
 
 - `init` writes a commented `intake.yaml` in the current directory with every field, its
@@ -122,7 +152,7 @@ render any policy in the conversation. Nothing leaves your machine except what y
 assistant.
 
 ```sh
-claude mcp add policyseed -- npx -y github:odedmoshe/policyseed mcp
+claude mcp add policyseed -- npx -y policyseed mcp
 ```
 
 Claude Desktop and Cursor configuration, the tool list and an example conversation are in
@@ -135,7 +165,7 @@ logging, who has admin access. `policyseed evidence` gathers that with the `aws`
 CLIs you already have installed and signed in, and saves it as dated JSON files plus an index:
 
 ```sh
-npx github:odedmoshe/policyseed evidence --providers aws,gcp,github \
+npx policyseed evidence --providers aws,gcp,github \
   --repo acme/app --org acme --project acme-prod
 ```
 
@@ -270,9 +300,8 @@ specific stack and adds export formats — this CLI does not include that tailor
 
 ## What this is not
 
-These are governance document templates, not legal advice, and using this tool does not by
-itself make you SOC 2 compliant or guarantee you'll pass an audit. SOC 2 compliance depends on
-whether you actually operate the controls these policies describe — access reviews happening on
+These are governance document templates, not legal advice, and not a compliance guarantee. A SOC 2
+report is an independent CPA firm's opinion, and it depends on whether you actually operate the controls these policies describe — access reviews happening on
 schedule, incidents actually being logged and triaged, backups actually being tested — not just
 on having the documents. Have a qualified person (counsel, an auditor, or an experienced
 compliance practitioner) review the output before you rely on it externally.
